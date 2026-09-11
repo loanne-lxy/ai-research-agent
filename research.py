@@ -30,8 +30,12 @@ import json
 import re
 import sys
 from dataclasses import dataclass, field
+from typing import Literal
+
+from pydantic import BaseModel, ValidationError
 
 from config import load_llm_config
+from corpus import get_event, resolve
 
 # ponytail: static generic fallback — used when the model call or JSON
 # parse fails. If a domain-specific default measurably plans better,
@@ -130,57 +134,122 @@ def research_plan_from_query(query: str) -> list:
             for line in m.group(1).splitlines() if line.strip()]
 
 
-_EVAL_PROMPT = """你是证据审核员。下面是研究回答的证据地图（章节标题+带引用ID的证据行）。只返回一个JSON对象（不要其他文字），note不超过15字：
+_EVAL_PROMPT = """你是证据审核员。下面是研究回答的证据地图（章节标题+全部正文行；不带引用ID的正文行即未引用陈述）。只返回一个JSON对象（不要其他文字），note不超过15字：
 {{"directions":[{{"name":"方向","events":数,"articles":数,"sufficient":true或false,"conflict":true或false,"note":"简"}}],"gaps":["需补充检索的缺口"],"conflicts":["相互矛盾的点"],"verdict":"sufficient或needs_work"}}
-标准：某方向证据行<3 → sufficient=false；证据互相矛盾 → conflict=true；存在 sufficient=false / conflict=true / gaps → verdict=needs_work。只数地图里实际出现的引用，草稿已声明知识库未覆盖的缺口要列入 gaps。
+标准：某方向证据行<3 → sufficient=false；单来源（独立source仅1个）支撑的结论 → sufficient=false 且列入 gaps（写"单来源: <结论>，需补充独立来源"）；证据互相矛盾 → conflict=true；未带引用ID的事实性陈述 → 列入 gaps（写"未引用: <该事实>"，寒暄/方法论解释不算）；存在 sufficient=false / conflict=true / gaps → verdict=needs_work。只数地图里实际出现的引用，草稿已声明知识库未覆盖的缺口要列入 gaps。
 
 研究问题：{question}
 研究计划：
 {plan}
 
+结论-独立来源数：
+{claims}
+
 证据地图：
 {draft}"""
 
 
-_CITATION_RE = re.compile(r"evt_[0-9a-f]{12}|[0-9a-f]{16}")
-
-
 def evidence_map(draft: str, cap: int = 2500) -> str:
-    """Compress a draft to what an evidence evaluation actually needs:
-    section headings + every line carrying a citation ID. Prose without
-    citations drops out — it makes no evidentiary claim. Keeps the map
-    short enough that the evaluator's own reasoning stays cheap.
+    """Draft -> what an evidence evaluation needs: every non-empty line —
+    headings, cited evidence lines, AND uncited prose. The evaluator's
+    job is to flag factual lines that carry no citation ID, so uncited
+    lines must survive into the map (dropping them made the 'facts need
+    citations' check impossible to run). Per-line truncation + the
+    whole-map cap keep the evaluator call cheap.
+    ponytail: the cap cuts the tail, so a >2500-char draft loses its
+    '## Citations' block from the map; raise the cap (budget allows
+    3000) if that shows up in E2E.
     """
-    lines = []
-    for line in draft.splitlines():
-        s = line.strip()
-        if not s:
-            continue
-        if s.startswith("#") or _CITATION_RE.search(s):
-            lines.append(s[:200])
-    return "\n".join(lines)[:cap]
+    return "\n".join(l.strip()[:200] for l in draft.splitlines() if l.strip())[:cap]
+
+
+def claim_sources(draft: str, max_claims: int = 8) -> list:
+    """Per-claim evidence profile: [{claim, support, sources}], where
+    sources = count of DISTINCT independent sources (event -> its
+    articles' sources; bare article -> its own source) backing the
+    claim's cited ids, via the same resolve chain citations.validate
+    uses. This is real data, not the LLM counting rows: N cited lines can
+    all trace to ONE source, and that is the failure sufficiency should
+    catch. An unresolvable citation contributes no source (a claim whose
+    ids are all fabricated shows 0 -> flagged insufficient, never silently
+    dropped); a draft with no '## Citations' claims yields [].
+    ponytail: claim labels are the model's short tags (趋势1/趋势2) —
+    finer claim identity needs sentence-level claims in the answer format.
+    """
+    from citations import extract_claims
+    profiles = []
+    for item in extract_claims(draft):
+        sources = set()
+        for cid in item["evidence"]:
+            # same split as citations.validate: events via get_event (the
+            # resolve path returns an event WITHOUT its articles), articles
+            # via resolve.
+            if cid.startswith("evt_"):
+                ev = get_event(cid)
+                if ev is None:
+                    continue
+                sources.update(a.get("source") for a in ev.get("articles", [])
+                               if a.get("source"))
+            else:
+                r = resolve(cid)
+                if r is None:
+                    continue
+                src = r["object"].get("source")
+                if src:
+                    sources.add(src)
+        profiles.append({"claim": item["claim"], "support": len(item["evidence"]),
+                         "sources": len(sources)})
+    profiles.sort(key=lambda p: p["sources"], reverse=True)
+    return profiles[:max_claims]
+
+
+class DirectionEvaluation(BaseModel):
+    name: str
+    events: int
+    articles: int
+    sufficient: bool
+    conflict: bool
+    note: str = ""
+
+
+class EvidenceEvaluation(BaseModel):
+    directions: list[DirectionEvaluation]
+    gaps: list[str]
+    conflicts: list[str]
+    verdict: Literal["sufficient", "needs_work"]
 
 
 def _parse_eval(text: str) -> dict:
-    """Extract the JSON object; malformed -> {} (treat as no issues)."""
+    """Extract + schema-validate the evaluation JSON. Malformed or
+    schema-invalid -> {} (evaluate_evidence's fail-closed guard maps that
+    to audit_failed — a schema violation means the audit can't be trusted,
+    not that the draft is fine)."""
     m = re.search(r"\{.*\}", text, re.S)
     if not m:
         return {}
     try:
         data = json.loads(m.group(0))
-        return data if isinstance(data, dict) else {}
-    except (json.JSONDecodeError, TypeError):
+        return EvidenceEvaluation.model_validate(data).model_dump()
+    except (json.JSONDecodeError, TypeError, ValidationError):
         return {}
 
 
-def evaluate_evidence(question: str, plan: list, draft: str) -> dict:
+def evaluate_evidence(question: str, plan: list, draft: str,
+                      claim_srcs: list | None = None) -> dict:
     """One LLM call judging the draft's evidence (per-direction counts,
-    sufficiency, conflicts, gaps). Never raises — returns {} on failure,
-    which the caller treats as 'no issues' and ships the draft as final.
+    sufficiency, conflicts, gaps). Sufficiency is anchored on
+    claim_srcs — per-claim independent-source counts computed in Python
+    (claim_sources), so the model checks 'claim -> how many independent
+    sources' instead of counting rows itself. Never raises. On failure (empty
+    response or unusable verdict) it returns {"verdict": "audit_failed"}
+    — fail-closed, so the caller ships a *degraded, clearly-marked*
+    answer instead of passing an unvetted draft as if it were sufficient.
     """
     if not plan:
         plan = list(DEFAULT_PLAN)
     plan_text = "\n".join(f"{i}. {s}" for i, s in enumerate(plan, 1))
+    claim_text = "\n".join(f"- {p['claim']}: {p['sources']} 个独立来源（{p['support']} 条引用）"
+                           for p in (claim_srcs or [])) or "(未解析出带引用的结论)"
     # Only the evidence map + a lean prompt reach the evaluator: this
     # Qwen3.8 deployment over-thinks verbose prompts (11k+ thinking
     # tokens on the heavy version, empty content) but stays reliable on
@@ -190,10 +259,17 @@ def evaluate_evidence(question: str, plan: list, draft: str) -> dict:
         _EVAL_PROMPT
         .replace("{question}", question)
         .replace("{plan}", plan_text)
+        .replace("{claims}", claim_text)
         .replace("{draft}", evidence_map(draft)),
         max_tokens=8000,
     )
-    return _parse_eval(raw)
+    issues = _parse_eval(raw)
+    # fail-closed: an audit that can't run is NOT "no issues" — a missing
+    # or unusable verdict means we can't prove the draft is grounded, so
+    # it downgrades to audit_failed rather than shipping as if it passed.
+    if issues.get("verdict") not in ("sufficient", "needs_work"):
+        return {"verdict": "audit_failed"}
+    return issues
 
 
 def build_revision_query(question: str, issues: dict,
@@ -243,34 +319,40 @@ def build_revision_query(question: str, issues: dict,
 
 
 # ------------------------------------------------- gap detection & follow-up
-_FOLLOWUP_PROMPT = """下面是研究回答被评估后发现的证据缺口。为每个缺口生成一条检索关键词（15字以内，直接给检索词，可中英混合，可含年份/季度），只返回一个JSON对象：
+_FOLLOWUP_PROMPT = """下面是研究回答被评估后发现的证据缺口与矛盾。为每个缺口/矛盾生成一条检索关键词（15字以内，直接给检索词，可中英混合，可含年份/季度）；矛盾的检索词优先用于裁决哪方属实。只返回一个JSON对象：
 {"follow_ups":["检索词1","检索词2"]}
 不要解释。
 
 研究问题：{question}
-缺口：
-{gaps}"""
+缺口/矛盾：
+{items}"""
 
 
-def detect_gaps(question: str, issues: dict) -> list:
-    """Turn the evaluator's free-text gaps into concrete follow-up
+def build_followup_queries(question: str, issues: dict) -> list:
+    """Turn the evaluator's gaps AND conflicts into concrete follow-up
     search queries. One LLM call; on any failure fall back to the raw
-    gap strings (still valid search phrases)."""
+    strings (still valid search phrases). Conflicts must produce queries
+    too — the loop's stop gate keys on gaps-or-conflicts, so a
+    conflict-only round would otherwise exit with nothing to search."""
     gaps = [str(g).strip() for g in issues.get("gaps", []) if str(g).strip()]
-    if not gaps:
+    conflicts = [str(c).strip() for c in issues.get("conflicts", [])
+                 if str(c).strip()]
+    if not gaps and not conflicts:
         return []
+    lines = [f"- 缺口: {g}" for g in gaps] + \
+            [f"- 矛盾: {c}" for c in conflicts]
     raw = _llm(_FOLLOWUP_PROMPT
                .replace("{question}", question)
-               .replace("{gaps}", "\n".join(f"- {g}" for g in gaps)))
+               .replace("{items}", "\n".join(lines)))
     m = re.search(r"\{.*\}", raw, re.S)
     try:
         data = json.loads(m.group(0)) if m else {}
         items = data.get("follow_ups") if isinstance(data, dict) else None
         queries = [str(x).strip() for x in (items or [])
                    if isinstance(x, (str, int)) and str(x).strip()]
-        return queries[:6] or list(gaps)
+        return queries[:6] or list(gaps + conflicts)
     except (json.JSONDecodeError, TypeError, AttributeError):
-        return list(gaps)
+        return list(gaps + conflicts)
 
 
 # ------------------------------------------------------- research loop
@@ -377,12 +459,39 @@ if __name__ == "__main__":
     assert len(_parse(json.dumps([f"s{i}" for i in range(20)]))) == 8
     # eval parsing + revision composition
     em = evidence_map("# 一、A\n没有引用的论述行。\n- 证据 [evt_307d86c5e35e] 展开\n## 二、B\n- 另一条 [2d5ee61a05111f0a] 与 evt_abc123def456")
-    assert em.count("没有引用") == 0 and "evt_307d86c5e35e" in em and "## 二、B" in em
+    # uncited prose stays in the map — the evaluator must be able to flag it
+    assert "没有引用的论述行" in em and "evt_307d86c5e35e" in em and "## 二、B" in em
+    assert len(evidence_map("x" * 5000)) <= 2500  # cap still bounds the map
+    # per-claim independent-source counts (sufficiency anchor): distinct
+    # sources across a claim's evidence, real corpus id + a fabricated one
+    from corpus import list_events
+    _real_ev = list_events(limit=1)[0]["citation"]
+    _cs = claim_sources(f"某趋势。\n\n## Citations\n- {_real_ev} — 事件标题（趋势1）\n- evt_{'0' * 12} — 假引用（趋势1）\n")
+    assert _cs and _cs[0]["claim"] == "趋势1" and _cs[0]["support"] == 2, _cs
+    assert _cs[0]["sources"] >= 1, _cs  # real event -> its articles' sources
+    assert claim_sources("无引用的纯文本") == []  # no tracked claims -> []
+    # fail-closed: an audit that can't run must NOT masquerade as "no issues"
+    _real_llm = _llm
+    _llm = lambda *a, **k: ""  # endpoint down / empty 200s
+    try:
+        assert evaluate_evidence("q", ["p"], "d") == {"verdict": "audit_failed"}
+        _llm = lambda *a, **k: '{"verdict":"sufficient","directions":[],"gaps":[],"conflicts":[]}'
+        assert evaluate_evidence("q", ["p"], "d").get("verdict") == "sufficient"
+        _llm = lambda *a, **k: '{"foo":1}'  # JSON but no usable verdict
+        assert evaluate_evidence("q", ["p"], "d") == {"verdict": "audit_failed"}
+    finally:
+        _llm = _real_llm
     ok = _parse_eval('```json\n{"directions":[{"name":"Memory","events":15,"articles":5,"sufficient":true,"conflict":false,"note":"ok"}],'
                      '"gaps":["评测方向仅2条事件"],"conflicts":[],"verdict":"needs_work"}\n```')
     assert ok["verdict"] == "needs_work"
     assert ok["directions"][0]["name"] == "Memory"
     assert "评测方向仅2条事件" in ok["gaps"]
+    # schema validation: wrong enum / wrong types / missing keys are
+    # rejected -> {} (not silently accepted as a valid evaluation)
+    assert _parse_eval('{"verdict":"banana"}') == {}
+    assert _parse_eval('{"directions":"hello","gaps":[],"conflicts":[],"verdict":"sufficient"}') == {}
+    assert _parse_eval('{"directions":[],"gaps":"x","conflicts":[],"verdict":"sufficient"}') == {}
+    assert _parse_eval('{"directions":[{}],"gaps":[],"conflicts":[],"verdict":"sufficient"}') == {}
     assert _parse_eval("no json") == {}
     rq = build_revision_query("测试问题", ok)
     assert "评测方向仅2条事件" in rq and "最终回答" in rq
@@ -398,16 +507,23 @@ if __name__ == "__main__":
                                 answer="旧版")
     assert "建议检索词" in rq_s and "评测基准 2026" in rq_s
     assert "自己调用 search_events / search_articles" in rq_s
-    # gap detection: LLM rephrases -> suggested follow-up queries
-    # (fallback = raw gaps); the agent searches with them itself
+    # follow-up queries: LLM rephrases gaps+conflicts -> search terms
+    # (fallback = raw gap/conflict strings); the agent searches with them itself
     _llm_orig = _llm
     _llm = lambda p: '{"follow_ups": ["Agent 评测基准 2026", "企业部署 案例 2026"]}'
-    assert detect_gaps("测试问题", ok) == ["Agent 评测基准 2026", "企业部署 案例 2026"]
-    _llm = lambda p: "not json"  # parse failure -> raw gap fallback
-    assert detect_gaps("测试问题", ok) == ["评测方向仅2条事件"]
+    assert build_followup_queries("测试问题", ok) == ["Agent 评测基准 2026", "企业部署 案例 2026"]
+    _llm = lambda p: "not json"  # parse failure -> raw fallback
+    assert build_followup_queries("测试问题", ok) == ["评测方向仅2条事件"]
     _llm = lambda p: ""  # empty response -> fallback
-    assert detect_gaps("测试问题", ok) == ["评测方向仅2条事件"]
-    assert detect_gaps("测试问题", {"gaps": []}) == []
+    assert build_followup_queries("测试问题", ok) == ["评测方向仅2条事件"]
+    assert build_followup_queries("测试问题", {"gaps": []}) == []
+    # conflict-only round must still yield a query (old detect_gaps returned []
+    # here and the loop stopped on 'no new follow-ups' despite needs_work)
+    cf = {"verdict": "needs_work", "gaps": [], "conflicts": ["厂商自报成绩与独立评测矛盾"]}
+    _llm = lambda p: '{"follow_ups": ["该厂商 成绩 独立复现"]}'
+    assert build_followup_queries("测试问题", cf) == ["该厂商 成绩 独立复现"]
+    _llm = lambda p: "not json"
+    assert build_followup_queries("测试问题", cf) == ["厂商自报成绩与独立评测矛盾"]
     _llm = _llm_orig
     # research loop: stop condition = sufficient verdict / round budget /
     # no NEW follow-ups (dedup is what prevents spinning on recurring gaps)

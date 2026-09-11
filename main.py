@@ -20,11 +20,11 @@ from agentscope.message import UserMsg
 from agent.builder import build_agent
 from citations import extract_claims, format_report, validate
 from intent import FACT, classify_intent
-from research import (MAX_ROUNDS, ResearchState, build_research_memory,
-                      build_research_query, build_revision_query,
-                      detect_gaps, evaluate_evidence, format_research_memory,
-                      new_followups, research_plan_from_query,
-                      should_continue)
+from research import (MAX_ROUNDS, ResearchState, build_followup_queries,
+                      build_research_memory, build_research_query,
+                      build_revision_query, claim_sources, evaluate_evidence,
+                      format_research_memory, new_followups,
+                      research_plan_from_query, should_continue)
 from session import (SESSION_DIR, list_sessions, load_research_memory,
                      load_state, save_research_memory, save_state)
 
@@ -140,9 +140,9 @@ async def run_repl() -> None:
             # budget is exhausted, or no new follow-up queries remain.
             while True:
                 issues = evaluate_evidence(q, research_plan_from_query(query),
-                                           answer)
-                if not issues:  # evaluator failed after retries -> non-blocking stop
-                    print("（证据评估失败，按当前版本定稿）")
+                                           answer, claim_sources(answer))
+                if issues.get("verdict") == "audit_failed":  # fail-closed
+                    print("（证据审核不可用（audit_failed）：无法证明充分性，降级定稿）")
                     break
                 if issues.get("directions"):
                     print(format_evidence_report(issues))
@@ -154,7 +154,7 @@ async def run_repl() -> None:
                 if rstate.round >= MAX_ROUNDS:
                     print(f"（停止：轮次预算用尽（{MAX_ROUNDS}轮），按当前版本定稿）")
                     break
-                new_queries = new_followups(rstate, detect_gaps(q, issues))
+                new_queries = new_followups(rstate, build_followup_queries(q, issues))
                 if not should_continue(rstate, issues, new_queries):
                     print(f"（停止：无新增补充检索词，按当前版本定稿）")
                     break
@@ -179,6 +179,8 @@ async def run_repl() -> None:
                 except Exception as e:  # noqa: BLE001 - keep the draft
                     print(f"[error] 修订失败，沿用上一版：{type(e).__name__}")
                     break
+        if research and issues.get("verdict") == "audit_failed":
+            print("⚠️  证据审核不可用（audit_failed）：本轮未完成充分性验证，以下答案未经证据审核")
         print(f"< {answer}")
         try:
             cit = validate(answer)
