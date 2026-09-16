@@ -2,6 +2,7 @@
 .env
 data/
 sessions/
+workspaces/
 __pycache__/
 *.pyc
 .idea/
