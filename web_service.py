@@ -66,12 +66,27 @@ def build_app():
     bus = InMemoryMessageBus()
     workspace = LocalWorkspaceManager(basedir=str(WORKSPACE_ROOT))
 
+    # The official Web UI runs on its own origin (vite dev server) and talks
+    # straight to this service, so it needs CORS. It sends a custom X-User-ID
+    # header, which must be allowed (the official agent_service example uses
+    # exactly this middleware set).
+    from fastapi.middleware import Middleware
+    from fastapi.middleware.cors import CORSMiddleware
+
     app = create_app(
         storage,
         bus,
         workspace_manager=workspace,
         custom_agent_cls=ResearchAgent,
         extra_agent_tools=_extra_agent_tools,
+        extra_middlewares=[
+            Middleware(
+                CORSMiddleware,
+                allow_origins=["*"],
+                allow_methods=["*"],
+                allow_headers=["*"],
+            ),
+        ],
     )
     return app, storage, workspace
 

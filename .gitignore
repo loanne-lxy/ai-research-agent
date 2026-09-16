@@ -3,6 +3,8 @@
 data/
 sessions/
 workspaces/
+web_ui/node_modules/
+web_ui/dist/
 __pycache__/
 *.pyc
 .idea/

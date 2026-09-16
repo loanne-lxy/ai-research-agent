@@ -38,7 +38,7 @@ from agentscope.event import (
     HintBlockEvent,
     ReplyStartEvent,
 )
-from agentscope.message import Msg
+from agentscope.message import Msg, TextBlock
 from agentscope.permission import PermissionContext, PermissionMode
 from agentscope.state import AgentState
 
@@ -100,6 +100,12 @@ def format_evidence_report(issues: dict) -> str:
     return "\n".join(lines)
 
 
+def _user_msg(text: str) -> Msg:
+    """A well-formed user Msg: AgentScope Msg needs role + block-list
+    content (a bare string is rejected by pydantic)."""
+    return Msg(name="user", role="user", content=[TextBlock(text=text)])
+
+
 def _hint(reply_id: str, text: str, source: str = "ResearchAgent") -> HintBlockEvent:
     """A one-shot progress hint for the UI (rendered as a system-hint block)."""
     return HintBlockEvent(
@@ -143,7 +149,7 @@ async def run_research_loop(
     out["intent"] = it.intent
     if it.intent == FACT:
         # Simple QA: single ReAct round, no research loop (v1 path as-is).
-        agen = Agent.reply_stream(main_agent, Msg(name="user", content=question),
+        agen = Agent.reply_stream(main_agent, _user_msg(question),
                                   yield_final_msg=True)
         final_msg = None
         async for ev in agen:
@@ -164,7 +170,7 @@ async def run_research_loop(
     rstate = ResearchState()
 
     # ---- round 1 (main agent, persistent state) ----
-    agen = Agent.reply_stream(main_agent, Msg(name="user", content=query),
+    agen = Agent.reply_stream(main_agent, _user_msg(query),
                               yield_final_msg=True)
     final_msg: Msg | None = None
     async for ev in agen:
@@ -208,7 +214,7 @@ async def run_research_loop(
             rev_agent = make_agent()
             rev_agen = Agent.reply_stream(
                 rev_agent,
-                Msg(name="user", content=build_revision_query(
+                _user_msg(build_revision_query(
                     question, issues, suggested_queries=new_queries, answer=answer)),
                 yield_final_msg=True,
             )

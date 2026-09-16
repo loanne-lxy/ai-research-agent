@@ -7,6 +7,11 @@ AgentState.context accumulates history automatically, so follow-ups
 like "刚才提到的那个展开讲讲" resolve. /save and /load persist that
 state across processes (see session.py).
 
+The research turn itself is delegated to the shared V2 loop
+(agent.research_agent.run_research_loop) — the same engine the AgentScope
+web service drives. This file only handles the REPL (commands, I/O,
+persistence); the loop logic lives in one place.
+
 Commands:  /quit exit   /reset start a fresh session   /tools list tools
             /save persist session to disk   /load resume (latest or /load <id>)
             /sessions list saved sessions   /state show research memory
@@ -15,58 +20,14 @@ from __future__ import annotations
 
 import asyncio
 
-from agentscope.message import UserMsg
+from agentscope.event import HintBlockEvent
 
 from agent.builder import build_agent
-from citations import extract_claims, format_report, validate
-from intent import FACT, classify_intent
-from research import (MAX_ROUNDS, ResearchState, build_followup_queries,
-                      build_research_memory, build_research_query,
-                      build_revision_query, claim_sources, evaluate_evidence,
-                      format_research_memory, new_followups,
-                      research_plan_from_query, should_continue)
+from agent.research_agent import run_research_loop
+from intent import classify_intent
+from research import format_research_memory
 from session import (SESSION_DIR, list_sessions, load_research_memory,
                      load_state, save_research_memory, save_state)
-
-
-def format_evidence_report(issues: dict) -> str:
-    """Per-direction evidence counts + gaps/conflicts, so the user sees
-    the evaluation layer worked (one line per direction, ✗ = 明显不足)."""
-    lines = ["【证据评估】"]
-    for d in issues.get("directions", []):
-        mark = "✓" if d.get("sufficient") else "✗"
-        conflict = "⚠ 有矛盾" if d.get("conflict") else ""
-        note = f" — {d['note']}" if d.get("note") else ""
-        lines.append(
-            f"  {mark} {d.get('name', '?')}：{d.get('events', 0)} events / "
-            f"{d.get('articles', 0)} sources {conflict}{note}".rstrip()
-        )
-    for g in issues.get("gaps", []):
-        lines.append(f"  缺口：{g}")
-    for c in issues.get("conflicts", []):
-        lines.append(f"  矛盾：{c}")
-    return "\n".join(lines)
-
-
-def extract_text(msg) -> str:
-    """Render a reply Msg to plain text: text blocks + a one-line marker
-    per tool call (so the user sees the agent actually searched).
-    Thinking / raw tool-result blocks are skipped."""
-    c = msg.content
-    if isinstance(c, str):
-        return c
-    parts = []
-    for b in c:
-        btype = (getattr(b, "type", None)
-                 or (b.get("type") if isinstance(b, dict) else None))
-        if btype == "text":
-            t = getattr(b, "text", None) or (b.get("text") if isinstance(b, dict) else None)
-            if t:
-                parts.append(t)
-        elif btype == "tool_call":
-            name = getattr(b, "name", None) or (b.get("name") if isinstance(b, dict) else None)
-            parts.append(f"  [检索] {name}")
-    return "\n".join(parts)
 
 
 async def run_repl() -> None:
@@ -123,77 +84,21 @@ async def run_repl() -> None:
             continue
         it = classify_intent(q)
         print(f"（intent: {it.intent} — {it.reason}）")
-        # research path (v2): plan first — the plan becomes the agent's
-        # working state in context; fact questions run the v1 path as-is.
-        research = it.intent != FACT
-        query = build_research_query(q) if research else q
-        issues = {}  # last evidence-evaluation dict (drives working memory)
-        rstate = ResearchState()
+        # Delegate the turn to the shared V2 research loop (also drives the
+        # web service): intent → plan → research → evaluate → gap → follow-up
+        # + citation validation. Progress streams out as HintBlockEvents; the
+        # final answer and the research working memory come back via `out`.
+        out: dict = {}
         try:
-            resp = await agent.reply(UserMsg(name="user", content=query))
+            async for ev in run_research_loop(q, agent, build_agent, out):
+                if isinstance(ev, HintBlockEvent):
+                    print(ev.hint)
         except Exception as e:  # noqa: BLE001 - REPL must survive model hiccups
             print(f"[error] {type(e).__name__}: {e}（可重试，知识库未受影响）")
             continue
-        answer = extract_text(resp)
-        if research:  # v2 research loop: Research → Evaluate → Gap →
-            # Follow-up, repeated until evidence is sufficient, the round
-            # budget is exhausted, or no new follow-up queries remain.
-            while True:
-                issues = evaluate_evidence(q, research_plan_from_query(query),
-                                           answer, claim_sources(answer))
-                if issues.get("verdict") == "audit_failed":  # fail-closed
-                    print("（证据审核不可用（audit_failed）：无法证明充分性，降级定稿）")
-                    break
-                if issues.get("directions"):
-                    print(format_evidence_report(issues))
-                if (issues.get("verdict") != "needs_work"
-                        or not (issues.get("gaps") or issues.get("conflicts"))):
-                    break
-                # STOP_CONDITION pre-gate: don't spend an LLM call once the
-                # round budget is reached (rstate.round = rounds completed).
-                if rstate.round >= MAX_ROUNDS:
-                    print(f"（停止：轮次预算用尽（{MAX_ROUNDS}轮），按当前版本定稿）")
-                    break
-                new_queries = new_followups(rstate, build_followup_queries(q, issues))
-                if not should_continue(rstate, issues, new_queries):
-                    print(f"（停止：无新增补充检索词，按当前版本定稿）")
-                    break
-                rstate.round += 1  # = completed supplementary rounds
-                print(f"（第{rstate.round}轮：证据不足/存在矛盾，由Agent按缺口自行补充检索…）")
-                for qq in new_queries:
-                    print(f"  建议检索: {qq}")
-                try:
-                    # stateless revision: a fresh agent, so the 3-round
-                    # research history never stacks in one context (E2E
-                    # blew 103k tokens and the framework truncation wiped
-                    # the task + citations block). The agent does the
-                    # supplementary research ITSELF (search_events/
-                    # search_articles); the loop only suggests queries.
-                    rev_agent = build_agent()
-                    rev = await rev_agent.reply(UserMsg(
-                        name="user",
-                        content=build_revision_query(q, issues,
-                                                     suggested_queries=new_queries,
-                                                     answer=answer)))
-                    answer = extract_text(rev)
-                except Exception as e:  # noqa: BLE001 - keep the draft
-                    print(f"[error] 修订失败，沿用上一版：{type(e).__name__}")
-                    break
-        if research and issues.get("verdict") == "audit_failed":
-            print("⚠️  证据审核不可用（audit_failed）：本轮未完成充分性验证，以下答案未经证据审核")
-        print(f"< {answer}")
-        try:
-            cit = validate(answer)
-            claims = extract_claims(answer)  # claim -> evidence ids (generated, not post-hoc)
-            print(format_report(cit))
-        except Exception as e:  # noqa: BLE001 - validation must never kill the REPL
-            print(f"[citations] check failed: {type(e).__name__}: {e}")
-            cit = {"ok": [], "total": 0, "missing": []}
-            claims = []
-        if research:  # assemble the working memory from what actually ran
-            active_memory = build_research_memory(
-                q, it.intent, research_plan_from_query(query), rstate,
-                issues, cit, claims)
+        print(f"< {out.get('answer', '')}")
+        if out.get("result") is not None:
+            active_memory = out["result"]
     print("bye")
 
 
