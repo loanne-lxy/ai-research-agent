@@ -59,3 +59,34 @@ async def build_agent() -> Agent:
             permission_context=PermissionContext(mode=PermissionMode.DONT_ASK),
         ),
     )
+
+
+_research_model: "OpenAIChatModel | None" = None
+
+
+def get_research_model() -> OpenAIChatModel:
+    """Unified model for the research controller's structured-JSON LLM calls
+    (planner / evidence evaluator / follow-up generator).
+
+    Same endpoint + credential as build_agent — one ``load_llm_config()``
+    source, so there is no second .env read and no second base_url/api_key/
+    model to keep in sync. Parameters are left open (no fixed budget or
+    temperature) and thinking is off, so each call passes its own
+    ``temperature`` / ``max_tokens`` via generate_kwargs (these flow into the
+    OpenAI request without colliding with the model's fixed params). One
+    instance per process, like the ReMe middleware.
+    """
+    global _research_model
+    if _research_model is None:
+        llm = load_llm_config()
+        credential = OpenAICredential(api_key=llm.api_key, base_url=llm.base_url)
+        _research_model = OpenAIChatModel(
+            credential=credential,
+            model=llm.model,
+            # open params: per-call temperature/max_tokens, thinking off
+            parameters=OpenAIChatModel.Parameters(),
+            stream=False,
+            max_retries=0,  # research._llm owns the retry loop
+            extra_body={"enable_thinking": False},
+        )
+    return _research_model

@@ -22,7 +22,7 @@ import asyncio
 
 from agentscope.event import HintBlockEvent
 
-from agent.builder import build_agent
+from agent.builder import build_agent, get_research_model
 from agent.research_agent import run_research_loop
 from intent import classify_intent
 from research import format_research_memory
@@ -90,7 +90,8 @@ async def run_repl() -> None:
         # final answer and the research working memory come back via `out`.
         out: dict = {}
         try:
-            async for ev in run_research_loop(q, agent, build_agent, out):
+            async for ev in run_research_loop(
+                    q, agent, build_agent, out, model=get_research_model()):
                 if isinstance(ev, HintBlockEvent):
                     print(ev.hint)
         except Exception as e:  # noqa: BLE001 - REPL must survive model hiccups

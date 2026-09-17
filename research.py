@@ -34,7 +34,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ValidationError
 
-from config import load_llm_config
+from agentscope.message import Msg, TextBlock
 from corpus import get_event, resolve
 
 # ponytail: static generic fallback — used when the model call or JSON
@@ -69,35 +69,58 @@ def _parse(text: str) -> list:
         return []
 
 
-def _llm(prompt: str, max_tokens: int = 2000) -> str:
-    """One LLM call, 3 attempts; returns raw content or "" on failure.
+# The unified AgentScope model for these structured-JSON calls. Set by the
+# research controller (run_research_loop) via set_research_model() — research
+# no longer builds its own model / re-reads .env. The self-check below and
+# any standalone call fall back to the shared factory when not yet injected.
+_research_model = None
 
-    enable_thinking=False on purpose: Qwen3.8 is a reasoning model,
-    and for these *structured-JSON* tasks its thinking is pure
-    overhead that eats the completion budget (observed: 6.3k thinking
-    tokens, empty content, finish_reason=length — on both a 3.6k-token
-    full draft and a 2.5k-token evidence map). With thinking off the
-    same call is ~2s and returns the JSON. max_tokens is still
-    generous; the endpoint also flaps with empty 200s, which the SDK
-    does not retry.
+
+def set_research_model(model) -> None:
+    """Inject the process-wide AgentScope model (DI from the controller)."""
+    global _research_model
+    _research_model = model
+
+
+def _resolve_model():
+    """The injected model, or the shared factory singleton as a fallback."""
+    if _research_model is not None:
+        return _research_model
+    from agent.builder import get_research_model
+    return get_research_model()
+
+
+async def _llm(prompt: str, max_tokens: int = 2000) -> str:
+    """One LLM call via the unified AgentScope model, 3 attempts; returns
+    raw content or "" on failure.
+
+    enable_thinking=False on purpose: Qwen3.8 is a reasoning model, and for
+    these *structured-JSON* tasks its thinking is pure overhead that eats the
+    completion budget (observed: 6.3k thinking tokens, empty content,
+    finish_reason=length — on both a 3.6k-token full draft and a 2.5k-token
+    evidence map). With thinking off the same call is ~2s and returns the
+    JSON. max_tokens is still generous; the endpoint also flaps with empty
+    200s, so the retry loop below (the SDK's own retries are off) covers it.
     """
-    budget = max(max_tokens, 2 * len(prompt))
     import time
-    from openai import OpenAI
-    llm = load_llm_config()
-    client = OpenAI(base_url=llm.base_url, api_key=llm.api_key, timeout=120)
+
+    model = _resolve_model()
+    budget = max(max_tokens, 2 * len(prompt))
+    msg = Msg(name="user", role="user", content=[TextBlock(text=prompt)])
     for attempt in range(3):
         try:
-            out = client.chat.completions.create(
-                model=llm.model,
-                messages=[{"role": "user", "content": prompt}],
+            resp = await model(
+                [msg],
                 temperature=0,
                 max_tokens=budget,
-                extra_body={"enable_thinking": False},
             )
-            content = out.choices[0].message.content or ""
-            if content.strip():
-                return content
+            # resp is a ChatResponse: content is a list of blocks. Join the
+            # TextBlock texts (thinking blocks are filtered out — see above).
+            text = "".join(
+                b.text for b in resp.content if getattr(b, "type", None) == "text"
+            )
+            if text and text.strip():
+                return text
         except Exception:  # noqa: BLE001 - the REPL must never die here
             pass
         if attempt < 2:
@@ -105,17 +128,17 @@ def _llm(prompt: str, max_tokens: int = 2000) -> str:
     return ""
 
 
-def make_plan(question: str) -> list:
+async def make_plan(question: str) -> list:
     """Research plan via one LLM call; never raises — falls back to
     DEFAULT_PLAN."""
-    steps = _parse(_llm(_PROMPT.replace("{question}", question)))
+    steps = _parse(await _llm(_PROMPT.replace("{question}", question)))
     return steps or list(DEFAULT_PLAN)
 
 
-def build_research_query(question: str) -> str:
+async def build_research_query(question: str) -> str:
     """Compose the working-state message: plan + directive, so the agent
     executes against the plan instead of re-planning or narrating it."""
-    plan = make_plan(question)
+    plan = await make_plan(question)
     numbered = "\n".join(f"{i}. {s}" for i, s in enumerate(plan, 1))
     return (
         f"[研究任务] 研究计划（你的工作状态，按此推进，不要向用户重复计划全文）：\n"
@@ -234,7 +257,7 @@ def _parse_eval(text: str) -> dict:
         return {}
 
 
-def evaluate_evidence(question: str, plan: list, draft: str,
+async def evaluate_evidence(question: str, plan: list, draft: str,
                       claim_srcs: list | None = None) -> dict:
     """One LLM call judging the draft's evidence (per-direction counts,
     sufficiency, conflicts, gaps). Sufficiency is anchored on
@@ -255,7 +278,7 @@ def evaluate_evidence(question: str, plan: list, draft: str,
     # tokens on the heavy version, empty content) but stays reliable on
     # a short one. Budget 8000 so even ~13k-style thinking can't clip
     # the JSON (observed flaky, so keep slack).
-    raw = _llm(
+    raw = await _llm(
         _EVAL_PROMPT
         .replace("{question}", question)
         .replace("{plan}", plan_text)
@@ -328,7 +351,7 @@ _FOLLOWUP_PROMPT = """下面是研究回答被评估后发现的证据缺口与�
 {items}"""
 
 
-def build_followup_queries(question: str, issues: dict) -> list:
+async def build_followup_queries(question: str, issues: dict) -> list:
     """Turn the evaluator's gaps AND conflicts into concrete follow-up
     search queries. One LLM call; on any failure fall back to the raw
     strings (still valid search phrases). Conflicts must produce queries
@@ -341,7 +364,7 @@ def build_followup_queries(question: str, issues: dict) -> list:
         return []
     lines = [f"- 缺口: {g}" for g in gaps] + \
             [f"- 矛盾: {c}" for c in conflicts]
-    raw = _llm(_FOLLOWUP_PROMPT
+    raw = await _llm(_FOLLOWUP_PROMPT
                .replace("{question}", question)
                .replace("{items}", "\n".join(lines)))
     m = re.search(r"\{.*\}", raw, re.S)
@@ -451,6 +474,13 @@ def format_research_memory(mem: dict) -> str:
 
 
 if __name__ == "__main__":
+    import asyncio
+
+    async def _const(value: str) -> str:
+        """Coroutine-returning constant: stand-in for the async _llm so the
+        self-check exercises the parse/fallback paths without a model."""
+        return value
+
     # self-check: parse logic + composition, no LLM call
     assert _parse('["收集事件","归类"]') == ["收集事件", "归类"]
     assert _parse('计划如下：\n```json\n["a","b"]\n```\n') == ["a", "b"]
@@ -471,16 +501,23 @@ if __name__ == "__main__":
     assert _cs[0]["sources"] >= 1, _cs  # real event -> its articles' sources
     assert claim_sources("无引用的纯文本") == []  # no tracked claims -> []
     # fail-closed: an audit that can't run must NOT masquerade as "no issues"
-    _real_llm = _llm
-    _llm = lambda *a, **k: ""  # endpoint down / empty 200s
-    try:
-        assert evaluate_evidence("q", ["p"], "d") == {"verdict": "audit_failed"}
-        _llm = lambda *a, **k: '{"verdict":"sufficient","directions":[],"gaps":[],"conflicts":[]}'
-        assert evaluate_evidence("q", ["p"], "d").get("verdict") == "sufficient"
-        _llm = lambda *a, **k: '{"foo":1}'  # JSON but no usable verdict
-        assert evaluate_evidence("q", ["p"], "d") == {"verdict": "audit_failed"}
-    finally:
-        _llm = _real_llm
+    # (_llm is async — the fake returns a coroutine so evaluate_evidence's
+    # `await _llm(...)` gets a string without touching the real model)
+    import asyncio
+
+    async def _eval_checks():
+        global _llm
+        real = _llm
+        _llm = lambda *a, **k: _const("")  # endpoint down / empty 200s
+        try:
+            assert await evaluate_evidence("q", ["p"], "d") == {"verdict": "audit_failed"}
+            _llm = lambda *a, **k: _const('{"verdict":"sufficient","directions":[],"gaps":[],"conflicts":[]}')
+            assert (await evaluate_evidence("q", ["p"], "d")).get("verdict") == "sufficient"
+            _llm = lambda *a, **k: _const('{"foo":1}')  # JSON but no usable verdict
+            assert await evaluate_evidence("q", ["p"], "d") == {"verdict": "audit_failed"}
+        finally:
+            _llm = real
+    asyncio.run(_eval_checks())
     ok = _parse_eval('```json\n{"directions":[{"name":"Memory","events":15,"articles":5,"sufficient":true,"conflict":false,"note":"ok"}],'
                      '"gaps":["评测方向仅2条事件"],"conflicts":[],"verdict":"needs_work"}\n```')
     assert ok["verdict"] == "needs_work"
@@ -509,22 +546,28 @@ if __name__ == "__main__":
     assert "自己调用 search_events / search_articles" in rq_s
     # follow-up queries: LLM rephrases gaps+conflicts -> search terms
     # (fallback = raw gap/conflict strings); the agent searches with them itself
-    _llm_orig = _llm
-    _llm = lambda p: '{"follow_ups": ["Agent 评测基准 2026", "企业部署 案例 2026"]}'
-    assert build_followup_queries("测试问题", ok) == ["Agent 评测基准 2026", "企业部署 案例 2026"]
-    _llm = lambda p: "not json"  # parse failure -> raw fallback
-    assert build_followup_queries("测试问题", ok) == ["评测方向仅2条事件"]
-    _llm = lambda p: ""  # empty response -> fallback
-    assert build_followup_queries("测试问题", ok) == ["评测方向仅2条事件"]
-    assert build_followup_queries("测试问题", {"gaps": []}) == []
-    # conflict-only round must still yield a query (old detect_gaps returned []
-    # here and the loop stopped on 'no new follow-ups' despite needs_work)
+    # build_followup_queries is async, so drive it in one event loop with an
+    # async fake _llm (patched via `global` — the fn reads the module global).
     cf = {"verdict": "needs_work", "gaps": [], "conflicts": ["厂商自报成绩与独立评测矛盾"]}
-    _llm = lambda p: '{"follow_ups": ["该厂商 成绩 独立复现"]}'
-    assert build_followup_queries("测试问题", cf) == ["该厂商 成绩 独立复现"]
-    _llm = lambda p: "not json"
-    assert build_followup_queries("测试问题", cf) == ["厂商自报成绩与独立评测矛盾"]
-    _llm = _llm_orig
+
+    async def _fu_checks():
+        global _llm
+        real = _llm
+        _llm = lambda *a, **k: _const('{"follow_ups": ["Agent 评测基准 2026", "企业部署 案例 2026"]}')
+        assert await build_followup_queries("测试问题", ok) == ["Agent 评测基准 2026", "企业部署 案例 2026"]
+        _llm = lambda *a, **k: _const("not json")  # parse failure -> raw fallback
+        assert await build_followup_queries("测试问题", ok) == ["评测方向仅2条事件"]
+        _llm = lambda *a, **k: _const("")  # empty response -> fallback
+        assert await build_followup_queries("测试问题", ok) == ["评测方向仅2条事件"]
+        assert await build_followup_queries("测试问题", {"gaps": []}) == []
+        # conflict-only round must still yield a query (old detect_gaps
+        # returned [] here and the loop stopped on 'no new follow-ups')
+        _llm = lambda *a, **k: _const('{"follow_ups": ["该厂商 成绩 独立复现"]}')
+        assert await build_followup_queries("测试问题", cf) == ["该厂商 成绩 独立复现"]
+        _llm = lambda *a, **k: _const("not json")
+        assert await build_followup_queries("测试问题", cf) == ["厂商自报成绩与独立评测矛盾"]
+        _llm = real
+    asyncio.run(_fu_checks())
     # research loop: stop condition = sufficient verdict / round budget /
     # no NEW follow-ups (dedup is what prevents spinning on recurring gaps)
     rs = ResearchState()
@@ -562,14 +605,24 @@ if __name__ == "__main__":
     assert "结论: Memory 长期化  ← 证据 ['evt_a']" in format_research_memory(mem)
     # empty issues -> nothing to fix, caller ships draft
     assert build_revision_query("q", {"gaps": [], "conflicts": []})
-    orig = make_plan
-    make_plan = lambda q: ["步骤A", "步骤B"]  # monkeypatch, no LLM
-    q = build_research_query("测试问题")
-    assert "1. 步骤A" in q and "2. 步骤B" in q and "测试问题" in q
-    make_plan = orig
+
+    # build_research_query / make_plan are async; verify composition with an
+    # async fake make_plan (patched via `global` so the fn sees it).
+    async def _rq_checks():
+        global make_plan
+        real = make_plan
+        async def fake_plan(q):
+            return ["步骤A", "步骤B"]
+        make_plan = fake_plan
+        try:
+            q = await build_research_query("测试问题")
+            assert "1. 步骤A" in q and "2. 步骤B" in q and "测试问题" in q
+        finally:
+            make_plan = real
+    asyncio.run(_rq_checks())
     print("self-check ok: parse + composition + eval + revision")
     if len(sys.argv) > 1:  # optional live probe against the real model
-        for s in make_plan(sys.argv[1]):
+        for s in asyncio.run(make_plan(sys.argv[1])):
             print(f"  {s}")
         print("---")
-        print(build_research_query(sys.argv[1]))
+        print(asyncio.run(build_research_query(sys.argv[1])))

@@ -55,6 +55,7 @@ from research import (
     evaluate_evidence,
     new_followups,
     research_plan_from_query,
+    set_research_model,
     should_continue,
 )
 
@@ -126,6 +127,7 @@ async def run_research_loop(
     main_agent: Agent,
     make_agent: Callable[[], Awaitable[Agent]],
     out: dict | None = None,
+    model=None,
 ) -> AsyncGenerator[AgentEvent, None]:
     """Run the V2 research loop, streaming AgentEvents to the caller.
 
@@ -136,6 +138,11 @@ async def run_research_loop(
     markers ride HintBlockEvents. ``make_agent`` is async because building
     the agent awaits the ReMe memory-tool registration.
 
+    ``model`` is the unified AgentScope model injected by the caller (DI)
+    for the structured-JSON LLM calls (planner / evidence evaluator /
+    follow-up generator). When omitted (CLI self-checks) it falls back to the
+    shared factory singleton — research never builds its own model.
+
     ``out`` (optional dict) is populated on completion:
       answer      final answer text
       final_msg   the final round's Msg
@@ -145,6 +152,8 @@ async def run_research_loop(
     Yields:
       AgentEvent — model / tool / text / hint events for the whole turn.
     """
+    if model is not None:
+        set_research_model(model)
     out = out if out is not None else {}
     it = classify_intent(question)
     out["intent"] = it.intent
@@ -166,7 +175,7 @@ async def run_research_loop(
         return
 
     research = True
-    query = build_research_query(question)
+    query = await build_research_query(question)
     issues: dict = {}
     rstate = ResearchState()
 
@@ -185,8 +194,8 @@ async def run_research_loop(
 
     # ---- bounded evaluate → gap → follow-up loop ----
     while True:
-        issues = evaluate_evidence(question, research_plan_from_query(query),
-                                   answer, claim_sources(answer))
+        issues = await evaluate_evidence(
+                    question, research_plan_from_query(query), answer, claim_sources(answer))
         if issues.get("verdict") == "audit_failed":  # fail-closed
             yield _hint(_current_reply_id(main_agent, "audit"),
                         "⚠️ 证据审核不可用（audit_failed）：无法证明充分性，降级定稿")
@@ -201,7 +210,8 @@ async def run_research_loop(
             yield _hint(_current_reply_id(main_agent, "stop"),
                         f"（停止：轮次预算用尽（{MAX_ROUNDS}轮），按当前版本定稿）")
             break
-        new_queries = new_followups(rstate, build_followup_queries(question, issues))
+        new_queries = new_followups(
+            rstate, await build_followup_queries(question, issues))
         if not should_continue(rstate, issues, new_queries):
             yield _hint(_current_reply_id(main_agent, "stop"),
                         "（停止：无新增补充检索词，按当前版本定稿）")
@@ -283,7 +293,10 @@ class ResearchAgent(Agent):
 
         question = _first_user_text(inputs)
         out: dict = {}
-        async for ev in run_research_loop(question, self, self._make_revision_agent, out):
+        from agent.builder import get_research_model
+        async for ev in run_research_loop(
+                question, self, self._make_revision_agent, out,
+                model=get_research_model()):
             yield ev
 
     async def _make_revision_agent(self) -> "ResearchAgent":
