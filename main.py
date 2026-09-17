@@ -23,9 +23,9 @@ import asyncio
 from agentscope.event import HintBlockEvent
 
 from agent.builder import build_agent, get_research_model
-from agent.research_agent import run_research_loop
 from intent import classify_intent
-from research import format_research_memory
+from research.controller import run_research_loop
+from research.memory import format_research_memory
 from session import (SESSION_DIR, list_sessions, load_research_memory,
                      load_state, save_research_memory, save_state)
 

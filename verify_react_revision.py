@@ -15,7 +15,7 @@ import json
 from agentscope.message import UserMsg
 
 from agent.builder import build_agent
-from main import extract_text
+from agent.research_agent import extract_text
 from research import build_revision_query
 
 
