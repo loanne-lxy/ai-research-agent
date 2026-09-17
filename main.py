@@ -31,7 +31,7 @@ from session import (SESSION_DIR, list_sessions, load_research_memory,
 
 
 async def run_repl() -> None:
-    agent = build_agent()
+    agent = await build_agent()
     active_memory = None  # last research working memory in this session
     print("AI 研究专家（知识库快照，/tools 看工具，/reset 清会话，/quit 退出）")
     while True:
@@ -45,7 +45,7 @@ async def run_repl() -> None:
         if q in ("/quit", "/exit"):
             break
         if q == "/reset":
-            agent = build_agent()
+            agent = await build_agent()
             active_memory = None
             print("（新会话已建立）")
             continue

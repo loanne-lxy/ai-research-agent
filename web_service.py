@@ -52,6 +52,21 @@ async def _extra_agent_tools(user_id: str, agent_id: str, session_id: str) -> li
     return tools
 
 
+# ------------------------------------------------------------- long-term memory
+async def _extra_agent_middlewares(user_id: str, agent_id: str,
+                                   session_id: str) -> list:
+    """The process-wide ReMeMiddleware (agent/memory.py) for long-term
+    memory: auto write-back after every reply + memory_search tool.
+
+    One instance per process: the same object is what the agent gets as
+    ``middlewares`` and what the service's ``get_toolkit`` asks for
+    ``list_tools()``, so the bound tool and the hooks stay coherent. The
+    middleware keys per-conversation state by session_id read live from the
+    agent, so sharing across agents/sessions is safe by design."""
+    from agent.memory import get_memory_middleware
+    return [get_memory_middleware()]
+
+
 # ------------------------------------------------------------- the app
 def build_app():
     from agentscope.app import create_app
@@ -79,6 +94,7 @@ def build_app():
         workspace_manager=workspace,
         custom_agent_cls=ResearchAgent,
         extra_agent_tools=_extra_agent_tools,
+        extra_agent_middlewares=_extra_agent_middlewares,
         extra_middlewares=[
             Middleware(
                 CORSMiddleware,

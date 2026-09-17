@@ -3,6 +3,7 @@
 data/
 sessions/
 workspaces/
+logs/
 web_ui/node_modules/
 web_ui/dist/
 __pycache__/

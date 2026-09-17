@@ -67,7 +67,7 @@ def check(label: str, ok: bool, detail: str) -> bool:
 
 
 async def main() -> int:
-    agent = build_agent()
+    agent = await build_agent()
     results = []
 
     print("Q1 检索准确 — W36 Agent 方向重要进展（3 条）")

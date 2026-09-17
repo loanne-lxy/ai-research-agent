@@ -55,7 +55,7 @@ async def main() -> int:
     print(msg[:400], "...\n")
 
     # same call main.py makes for the revision round
-    agent = build_agent()
+    agent = await build_agent()
     resp = await agent.reply(UserMsg(name="user", content=msg))
 
     print("=== agent 自主发起的 tool_call ===")

@@ -124,7 +124,7 @@ def _current_reply_id(agent: Agent, fallback: str) -> str:
 async def run_research_loop(
     question: str,
     main_agent: Agent,
-    make_agent: Callable[[], Agent],
+    make_agent: Callable[[], Awaitable[Agent]],
     out: dict | None = None,
 ) -> AsyncGenerator[AgentEvent, None]:
     """Run the V2 research loop, streaming AgentEvents to the caller.
@@ -133,7 +133,8 @@ async def run_research_loop(
     follow-up round runs on a *fresh* agent from ``make_agent()`` (stateless
     revision — the same context-blowup fix the CLI uses). Every round's
     events are yielded so the service can stream + persist them; progress
-    markers ride HintBlockEvents.
+    markers ride HintBlockEvents. ``make_agent`` is async because building
+    the agent awaits the ReMe memory-tool registration.
 
     ``out`` (optional dict) is populated on completion:
       answer      final answer text
@@ -211,7 +212,7 @@ async def run_research_loop(
                     + "；".join(new_queries) + "）")
         try:
             # stateless revision on a fresh agent (see module docstring).
-            rev_agent = make_agent()
+            rev_agent = await make_agent()
             rev_agen = Agent.reply_stream(
                 rev_agent,
                 _user_msg(build_revision_query(
@@ -285,10 +286,16 @@ class ResearchAgent(Agent):
         async for ev in run_research_loop(question, self, self._make_revision_agent, out):
             yield ev
 
-    def _make_revision_agent(self) -> "ResearchAgent":
+    async def _make_revision_agent(self) -> "ResearchAgent":
         """A stateless revision agent sharing this agent's model/prompt/
         tools/config but with a fresh context (DONT_ASK, same session id so
-        its events stream to this session)."""
+        its events stream to this session). The ReMe middleware is re-passed
+        (process-wide singleton, same instance the parent was built with) so
+        the revision round's exchange is written back to long-term memory
+        like any other turn. ``async`` to match ``make_agent()`` in
+        ``run_research_loop`` (the CLI's ``build_agent`` is async)."""
+        from agent.memory import get_memory_middleware
+
         return ResearchAgent(
             name=self.name,
             system_prompt=self._system_prompt,
@@ -298,6 +305,7 @@ class ResearchAgent(Agent):
             context_config=self.context_config,
             react_config=self.react_config,
             injection_config=self.injection_config,
+            middlewares=[get_memory_middleware()],
             state=AgentState(
                 session_id=self.state.session_id,
                 permission_context=PermissionContext(mode=PermissionMode.DONT_ASK),
