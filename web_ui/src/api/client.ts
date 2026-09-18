@@ -3,6 +3,13 @@ import { toast } from 'sonner';
 export const getBaseUrl = () => localStorage.getItem('server_url') ?? '';
 export const getUserId = () => localStorage.getItem('username') ?? '';
 
+// --- JWT auth (the token replaces the bare X-User-ID header; the backend
+// rewrites it back to X-User-ID for the official routers) ---
+export const getToken = () => localStorage.getItem('token') ?? '';
+export const setToken = (t: string) => localStorage.setItem('token', t);
+export const clearAuth = () => localStorage.removeItem('token');
+export const isAuthed = () => !!getToken();
+
 /**
  * Structured error thrown for non-2xx HTTP responses.
  * `message` contains the human-readable detail extracted from the backend.
@@ -39,8 +46,19 @@ export const TIMEOUT_STATUS = 408;
 
 function buildHeaders(hasBody: boolean, userId?: string): Record<string, string> {
 	const headers: Record<string, string> = { 'X-User-ID': userId ?? getUserId() };
+	const token = getToken();
+	if (token) headers.Authorization = `Bearer ${token}`;
 	if (hasBody) headers['Content-Type'] = 'application/json';
 	return headers;
+}
+
+/** A 401 *with* a token means the token is dead (expired/revoked): drop it
+ *  and bounce to /login. A 401 without a token (bad login) is left to the
+ *  caller — no redirect loop. */
+function handleUnauthorized(path: string): void {
+	if (!getToken() || path === '/api/auth/login') return;
+	clearAuth();
+	if (window.location.pathname !== '/login') window.location.href = '/login';
 }
 
 /** Parse the response body and extract the `detail` field if the backend returned JSON. */
@@ -107,6 +125,7 @@ async function streamRequest(path: string, options: RequestOptions = {}): Promis
 
 	if (!res.ok) {
 		const detail = await extractErrorDetail(res);
+		if (res.status === 401) handleUnauthorized(path);
 		const error = new ApiError(res.status, detail);
 		if (!silent) toast.error(detail);
 		throw error;

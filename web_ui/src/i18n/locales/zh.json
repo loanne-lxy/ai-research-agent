@@ -51,7 +51,10 @@
 		"message": "消息",
 		"llm": "LLM",
 		"tts": "TTS",
-		"embedding": "向量"
+		"embedding": "向量",
+		"history": "历史记录",
+		"home": "研究主页",
+		"memory": "记忆"
 	},
 	"error": {
 		"description": "页面遇到意外错误。你可以重试或返回首页。",

@@ -47,7 +47,7 @@ def research_plan_from_query(query: str) -> list:
     """Recover the numbered plan lines from a build_research_query output
     (the plan is the working state in context; the evaluator sees the
     same steps). Malformed/absent -> [] (evaluator uses defaults)."""
-    m = re.search(r"研究计划（.*?）：\n((?:\d+\. .*\n?)+)", query, re.S)
+    m = re.search(r"研究计划（.*?）：\n((?:\d+\. [^\n]*\n?)+)", query)
     if not m:
         return []
     return [re.sub(r"^\d+\. ", "", line).strip()

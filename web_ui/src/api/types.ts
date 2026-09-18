@@ -154,6 +154,8 @@ export interface SessionRecord extends RecordBase {
 export interface CreateSessionRequest {
 	agent_id: string;
 	workspace_id?: string;
+	/** Display name (backend accepts; defaults to datetime if omitted). */
+	name?: string;
 	chat_model_config?: ChatModelConfig | null;
 	/** Optional fallback model. Omit (or pass null) for no fallback. */
 	fallback_chat_model_config?: ChatModelConfig | null;

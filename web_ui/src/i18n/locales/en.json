@@ -51,7 +51,10 @@
 		"message": "Message",
 		"llm": "LLM",
 		"tts": "TTS",
-		"embedding": "Embedding"
+		"embedding": "Embedding",
+		"history": "History",
+		"home": "Home",
+		"memory": "Memory"
 	},
 	"error": {
 		"description": "The page hit an unexpected error. You can retry or go back home.",

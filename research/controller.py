@@ -68,6 +68,7 @@ async def run_research_loop(
     make_agent: Callable[[], Awaitable[Agent]],
     out: dict | None = None,
     model=None,
+    on_progress: Callable[[dict], None] | None = None,
 ) -> AsyncGenerator[AgentEvent, None]:
     """Run the V2 research loop, streaming AgentEvents to the caller.
 
@@ -123,6 +124,20 @@ async def run_research_loop(
     issues: dict = {}
     rstate = ResearchState()
 
+    _EMPTY_CIT = {"ok": [], "total": 0, "missing": []}
+
+    def _progress(issues_snap: dict, cit_snap: dict | None = None) -> None:
+        """Push a partial sidecar snapshot (plan + latest evaluation) so
+        the Workspace UI can render it while the run is still in flight.
+        ponytail: overwrites the same file each milestone; the final
+        write below carries claims + citations."""
+        if on_progress:
+            on_progress(build_research_memory(
+                question, it.intent, research_plan_from_query(query),
+                rstate, issues_snap, cit_snap or _EMPTY_CIT, []))
+
+    _progress({"verdict": "running"})  # plan is known — show it before round 1
+
     # ---- round 1 (main agent, persistent state) ----
     agen = Agent.reply_stream(main_agent, _user_msg(query),
                               yield_final_msg=True)
@@ -147,6 +162,7 @@ async def run_research_loop(
         if issues.get("directions"):
             yield _hint(_current_reply_id(main_agent, "eval"),
                         format_evidence_report(issues))
+            _progress(issues)  # latest per-direction evidence to the UI
         if (issues.get("verdict") != "needs_work"
                 or not (issues.get("gaps") or issues.get("conflicts"))):
             break
@@ -204,6 +220,7 @@ async def run_research_loop(
                     f"[citations] check failed: {type(e).__name__}: {e}")
         cit = {"ok": [], "total": 0, "missing": []}
         claims = []
+    _progress(issues, cit)  # final citation snapshot (claims land in sidecar)
 
     out["answer"] = answer
     out["final_msg"] = final_msg

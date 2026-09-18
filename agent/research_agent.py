@@ -101,13 +101,40 @@ class ResearchAgent(Agent):
                 yield ev
             return
 
+        # Follow-up turn in an existing research session: the service
+        # reloads the persisted AgentState each turn, so a non-empty
+        # context means round 1 already ran — answer as a plain ReAct
+        # reply (the agent sees the whole research history) instead of
+        # forking a brand-new research loop.
+        if self.state.context:
+            async for ev in super().reply_stream(
+                    inputs=inputs, structured_schema=structured_schema,
+                    yield_final_msg=yield_final_msg):
+                yield ev
+            return
+
         question = _first_user_text(inputs)
         out: dict = {}
+
+        def _persist(mem: dict) -> None:
+            from session import save_research_memory
+            try:
+                save_research_memory(self.state.session_id, mem)
+            except Exception as e:  # never break the chat turn over persistence
+                print(f"[research] sidecar save failed: {e}")
+
         from agent.builder import get_research_model
         async for ev in run_research_loop(
                 question, self, self._make_revision_agent, out,
-                model=get_research_model()):
+                model=get_research_model(), on_progress=_persist):
             yield ev
+        # Persist the research sidecar on the web path too (the CLI already
+        # does this; the Workspace UI's Evidence/Sources/Citation/Report
+        # sections read it). CLI files keep working unchanged. The final
+        # write carries claims; in-flight milestones already wrote partial
+        # snapshots via on_progress.
+        if out.get("result") is not None:
+            _persist(out["result"])
 
     async def _make_revision_agent(self) -> "ResearchAgent":
         """A stateless revision agent sharing this agent's model/prompt/

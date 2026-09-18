@@ -1,9 +1,10 @@
 import {
 	BookText,
-	BotMessageSquare,
+	Brain,
 	Cable,
-	Calendars,
 	Compass,
+	History,
+	House,
 	KeyRound,
 	Languages,
 	LibraryBig,
@@ -64,125 +65,138 @@ export function AppSidebar() {
 			<SidebarContent>
 				<SidebarGroup>
 					<SidebarGroupContent>
-						<SidebarMenu>
-							<SidebarMenuItem key={'chat'}>
-								<SidebarMenuButton
-									tooltip={{ children: t('common.chat'), hidden: false }}
-									isActive={
-										location.pathname === '/chat' ||
-										location.pathname.startsWith('/chat/')
-									}
-									onClick={() => navigate('/chat')}
-									className="justify-center"
-								>
-									<BotMessageSquare />
-								</SidebarMenuButton>
-							</SidebarMenuItem>
-							<SidebarMenuItem>
-								<SidebarMenuButton
-									tooltip={{ children: t('common.schedule'), hidden: false }}
-									isActive={location.pathname === '/schedule'}
-									onClick={() => navigate('/schedule')}
-									className="justify-center"
-								>
-									<Calendars />
-								</SidebarMenuButton>
-							</SidebarMenuItem>
-							<SidebarMenuItem>
-								<SidebarMenuButton
-									tooltip={{ children: t('common.channel'), hidden: false }}
-									isActive={location.pathname === '/channel'}
-									onClick={() => navigate('/channel')}
-									className="px-2"
-								>
-									<Cable />
-								</SidebarMenuButton>
-							</SidebarMenuItem>
-						</SidebarMenu>
+					<SidebarMenu>
+					<SidebarMenuItem key={'home'}>
+					<SidebarMenuButton
+					tooltip={{ children: t('common.home'), hidden: false }}
+					isActive={
+					location.pathname === '/' ||
+					location.pathname.startsWith('/workspace/')
+					}
+					onClick={() => navigate('/')}
+					className="justify-center"
+					>
+					<House />
+					</SidebarMenuButton>
+					</SidebarMenuItem>
+					<SidebarMenuItem>
+					<SidebarMenuButton
+					tooltip={{ children: t('common.history'), hidden: false }}
+					isActive={location.pathname === '/history'}
+					onClick={() => navigate('/history')}
+					className="justify-center"
+					>
+					<History />
+					</SidebarMenuButton>
+					</SidebarMenuItem>
+					<SidebarMenuItem>
+					<SidebarMenuButton
+					tooltip={{ children: t('common.channel'), hidden: false }}
+					isActive={location.pathname === '/channel'}
+					onClick={() => navigate('/channel')}
+					className="px-2"
+					>
+					<Cable />
+					</SidebarMenuButton>
+					</SidebarMenuItem>
+					</SidebarMenu>
 					</SidebarGroupContent>
 				</SidebarGroup>
 				<SidebarGroup>
 					<SidebarGroupContent>
-						<SidebarMenu>
-							<SidebarMenuItem>
-								<SidebarMenuButton
-									tooltip={{ children: t('common.credential'), hidden: false }}
-									isActive={location.pathname === '/credential'}
-									onClick={() => navigate('/credential')}
-									className="justify-center"
-								>
-									<KeyRound />
-								</SidebarMenuButton>
-							</SidebarMenuItem>
-							<SidebarMenuItem>
-								<SidebarMenuButton
-									tooltip={{ children: t('common.mcp-hub'), hidden: false }}
-									// Stays lit while browsing a hub under /mcp/:hubId.
-									isActive={location.pathname.startsWith('/mcp')}
-									onClick={() => navigate('/mcp')}
-									className="justify-center"
-								>
-									<MCPSvg />
-								</SidebarMenuButton>
-							</SidebarMenuItem>
-							<SidebarMenuItem>
-								<SidebarMenuButton
-									tooltip={{ children: t('common.skill-hub'), hidden: false }}
-									isActive={location.pathname.startsWith('/skill')}
-									onClick={() => navigate('/skill')}
-									className="justify-center"
-								>
-									<BookText />
-								</SidebarMenuButton>
-							</SidebarMenuItem>
-							<SidebarMenuItem>
-								<SidebarMenuButton
-									tooltip={{ children: t('common.knowledge'), hidden: false }}
-									isActive={location.pathname === '/knowledge'}
-									onClick={() => navigate('/knowledge')}
-									className="justify-center"
-								>
-									<LibraryBig />
-								</SidebarMenuButton>
-							</SidebarMenuItem>
-						</SidebarMenu>
+					<SidebarMenu>
+					<SidebarMenuItem>
+					<SidebarMenuButton
+					tooltip={{ children: t('common.credential'), hidden: false }}
+					isActive={location.pathname === '/credential'}
+					onClick={() => navigate('/credential')}
+					className="justify-center"
+					>
+					<KeyRound />
+					</SidebarMenuButton>
+					</SidebarMenuItem>
+					<SidebarMenuItem>
+					<SidebarMenuButton
+					tooltip={{ children: t('common.mcp-hub'), hidden: false }}
+					// Stays lit while browsing a hub under /mcp/:hubId.
+					isActive={location.pathname.startsWith('/mcp')}
+					onClick={() => navigate('/mcp')}
+					className="justify-center"
+					>
+					<MCPSvg />
+					</SidebarMenuButton>
+					</SidebarMenuItem>
+					<SidebarMenuItem>
+					<SidebarMenuButton
+					tooltip={{ children: t('common.skill-hub'), hidden: false }}
+					isActive={location.pathname.startsWith('/skill')}
+					onClick={() => navigate('/skill')}
+					className="justify-center"
+					>
+					<BookText />
+					</SidebarMenuButton>
+					</SidebarMenuItem>
+					<SidebarMenuItem>
+					<SidebarMenuButton
+					tooltip={{ children: t('common.knowledge'), hidden: false }}
+					isActive={location.pathname === '/knowledge'}
+					onClick={() => navigate('/knowledge')}
+					className="justify-center"
+					>
+					<LibraryBig />
+					</SidebarMenuButton>
+					</SidebarMenuItem>
+					<SidebarMenuItem>
+					<SidebarMenuButton
+					tooltip={{ children: t('common.memory'), hidden: false }}
+					isActive={location.pathname === '/memory'}
+					onClick={() => navigate('/memory')}
+					className="justify-center"
+					>
+					<Brain />
+					</SidebarMenuButton>
+					</SidebarMenuItem>
+					</SidebarMenu>
 					</SidebarGroupContent>
 				</SidebarGroup>
 			</SidebarContent>
 			<SidebarFooter>
 				<SidebarMenu>
 					<SidebarMenuItem>
-						<SidebarMenuButton
-							tooltip={{
-								children: i18n.language.startsWith('zh')
-									? t('common.switchToEn')
-									: t('common.switchToZh'),
-								hidden: false,
-							}}
-							onClick={handleToggleLanguage}
-							className="justify-center"
-						>
-							<Languages />
-						</SidebarMenuButton>
+					<SidebarMenuButton
+					tooltip={{
+					children: i18n.language.startsWith('zh')
+					? t('common.switchToEn')
+					: t('common.switchToZh'),
+					hidden: false,
+					}}
+					onClick={handleToggleLanguage}
+					className="justify-center"
+					>
+					<Languages />
+					</SidebarMenuButton>
 					</SidebarMenuItem>
 					<SidebarMenuItem>
-						<SidebarMenuButton
-							tooltip={{ children: t('tour.trigger'), hidden: false }}
-							onClick={handleStartTour}
-							className="justify-center"
-						>
-							<Compass />
-						</SidebarMenuButton>
+					<SidebarMenuButton
+					tooltip={{ children: t('tour.trigger'), hidden: false }}
+					onClick={handleStartTour}
+					className="justify-center"
+					>
+					<Compass />
+					</SidebarMenuButton>
 					</SidebarMenuItem>
 					<SidebarMenuItem>
-						<SidebarMenuButton
-							tooltip={{ children: t('common.settings'), hidden: false }}
-							isActive={location.pathname === '/setup'}
-							onClick={() => navigate('/setup')}
-							className="justify-center"
-						>
-							<UserRound />
-						</SidebarMenuButton>
+					<SidebarMenuButton
+					tooltip={{ children: t('common.settings'), hidden: false }}
+					isActive={
+					location.pathname === '/settings' ||
+					location.pathname === '/setup'
+					}
+					onClick={() => navigate('/settings')}
+					className="justify-center"
+					>
+					<UserRound />
+					</SidebarMenuButton>
 					</SidebarMenuItem>
 				</SidebarMenu>
 			</SidebarFooter>

@@ -12,7 +12,7 @@ Backends (this box has NO redis-server):
   bus       InMemoryMessageBus       (single-process)
   workspace LocalWorkspaceManager
 
-``seed()`` idempotently registers, for user "loanne":
+``ensure_user()`` idempotently registers, for user "loanne":
   * the Qwen OpenAI-compatible credential (endpoint/key from .env),
   * the Research Expert agent (system_prompt.md),
   * one session bound to that agent + the Qwen model config,
@@ -104,11 +104,19 @@ def build_app():
             ),
         ],
     )
+
+    # JWT auth edge: Bearer token -> X-User-ID rewrite (covers all official
+    # routers + our /api/* reads). Added last => outermost middleware, so it
+    # sees the original Authorization header before CORS.
+    from auth import JwtAuthMiddleware, router as auth_router
+    app.add_middleware(JwtAuthMiddleware)
+    app.include_router(auth_router)
+
     return app, storage, workspace
 
 
-# ------------------------------------------------------------- seed
-async def seed(storage, workspace, user_id: str = USER_ID) -> dict:
+# ------------------------------------------------------------- bootstrap
+async def ensure_user(storage, workspace, user_id: str) -> dict:
     """Idempotently register credential + research agent + session."""
     from agentscope.agent import ContextConfig, ReActConfig
     from agentscope.app.storage import (
@@ -182,7 +190,20 @@ async def seed(storage, workspace, user_id: str = USER_ID) -> dict:
         )
         print(f"[seed] created session id={session.id} (model={llm.model})")
 
-    return {"credential": cred_id, "agent": agent_id, "session": session.id}
+    return {
+        "credential": cred_id,
+        "agent": agent_id,
+        "session": session.id,
+        # Model binding for NEW sessions the UI creates (a research session
+        # must be bound to the credential or round 1 has no model):
+        "model": {
+            "type": "openai_credential",
+            "credential_id": cred_id,
+            "model": llm.model,
+            "parameters": {"temperature": llm.temperature,
+                           "max_tokens": llm.max_tokens},
+        },
+    }
 
 
 # ------------------------------------------------------------- entry
@@ -202,10 +223,21 @@ def main():
 
     orig_lifespan = app.router.lifespan_context
 
+    # Seed the default login (idempotent). Password from env, default = the
+    # username itself; printed once on first creation.
+    import os
+    from auth import USERS_FILE, create_user
+    _seed_pw = os.getenv("SEED_PASSWORD", USER_ID)
+    if not USERS_FILE.exists():
+        created = create_user(USER_ID, _seed_pw)
+        if created:
+            print(f"[service] created login user={USER_ID!r} password={_seed_pw!r} "
+                  f"(change via SEED_PASSWORD env or edit data/users.json)")
+
     @asynccontextmanager
     async def _lifespan(asgi_app):
         async with orig_lifespan(asgi_app):
-            ids = await seed(storage, workspace)
+            ids = await ensure_user(storage, workspace, USER_ID)
             print(f"[service] seeded ids={json.dumps(ids)}")
             print(f"[service] ready — UI server_url: http://{args.host}:{args.port} "
                   f"username: {USER_ID}")
